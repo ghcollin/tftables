@@ -20,7 +20,7 @@ or download and run
 ```
 python setup.py install
 ```
-or simply include this file is your project directory.
+or simply copy `tftables.py` into your project directory.
 
 `tftables` depends on `multitables`, `numpy` and `tensorflow`.
 
