@@ -21,5 +21,5 @@ setup(
         'Topic :: Software Development :: Libraries :: Python Modules'
     ],
     py_modules=['tftables'],
-    requires=['multitables', 'numpy>=1.10.2', 'tensorflow']
+    install_requires=['multitables', 'numpy!=1.10.1', 'tensorflow']
 )
