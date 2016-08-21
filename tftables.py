@@ -1,3 +1,8 @@
+# Copyright (C) 2016 G. H. Collin (ghcollin)
+#
+# This software may be modified and distributed under the terms
+# of the MIT license.  See the LICENSE.txt file for details.
+
 import tensorflow as tf
 import multitables as mtb
 import numpy as np
