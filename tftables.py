@@ -164,7 +164,7 @@ class TableReader:
                 with queue.get() as block:
                     # First, if the batch size is smaller than the block size, then
                     # batches are extracted from the block as yielded.
-                    indexes = range(0, block_size, self.batch_size)
+                    indexes = range(0, block_size+1, self.batch_size)
                     for start, end in zip(indexes[:-1], indexes[1:]):
                         yield block[start:end]
 
