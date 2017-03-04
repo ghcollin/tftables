@@ -27,8 +27,11 @@ class TestTableRow(tables.IsDescription):
     col_B = tables.Float64Col(shape=test_table_col_B_shape)
 
 
-def get_batches(array, size):
-    return [ array[i:i+size] for i in range(0, len(array), size)]
+def get_batches(array, size, trim_remainder=False):
+    result = [ array[i:i+size] for i in range(0, len(array), size)]
+    if trim_remainder and len(result[-1]) != len(result[0]):
+        result = result[:-1]
+    return result
 
 
 def assert_array_equal(self, a, b):
@@ -40,7 +43,7 @@ def assert_items_equal(self, a, b, key, epsilon=0):
     a = [item for sublist in a for item in sublist]
     b = [item for sublist in b for item in sublist]
     self.assertEqual(len(a), len(b))
-    a_sorted, b_sorted = sorted(a, key=key), sorted(b, key=key)
+    a_sorted, b_sorted = (a, b) if key is None else (sorted(a, key=key), sorted(b, key=key))
 
     unique_a, counts_a = np.unique(a, return_counts=True)
     unique_b, counts_b = np.unique(b, return_counts=True)
@@ -56,7 +59,7 @@ def assert_items_equal(self, a, b, key, epsilon=0):
                                                   + "\n" + str(delta))
 
 
-class BufferTest(tf.test.TestCase):
+class TFTablesTest(tf.test.TestCase):
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
@@ -86,7 +89,7 @@ class BufferTest(tf.test.TestCase):
         time.sleep(5)
         shutil.rmtree(self.test_dir)
 
-    def test_reader(self):
+    def test_cyclic_unordered(self):
         N = 4
         N_threads = 4
 
@@ -94,7 +97,7 @@ class BufferTest(tf.test.TestCase):
             blocksize = batchsize*2 + 1
             reader = tftables.open_file(self.test_filename, batchsize)
             cycles = lcm(len(array), blocksize)//len(array)
-            batch = reader.get_batch(path, block_size=blocksize)
+            batch = reader.get_batch(path, block_size=blocksize, ordered=False)
             batches = get_batches(array, batchsize)*cycles*N_threads
             loader = tftables.FIFOQueueLoader(reader, N, get_tensors(batch), threads=N_threads)
             return reader, loader, batches
@@ -112,7 +115,7 @@ class BufferTest(tf.test.TestCase):
         table_result = []
 
         with self.test_session() as sess:
-            sess.run(tf.initialize_all_variables())
+            sess.run(tf.global_variables_initializer())
 
             array_loader.start(sess)
             table_loader.start(sess)
@@ -142,10 +145,44 @@ class BufferTest(tf.test.TestCase):
         array_reader.close()
         table_reader.close()
 
-    def test_cyclic_option(self):
-        reader = tftables.open_file(self.test_filename, 10)
-        with self.assertRaises(ValueError):
-            batch = reader.get_batch("", cyclic=False)
+    def test_noncylic(self):
+        batch_size = 8
+        reader = tftables.open_file(self.test_filename, batch_size)
+
+        array_batch = reader.get_batch(self.test_array_path, cyclic=False)
+        table_batch = reader.get_batch(self.test_table_path, cyclic=False)
+
+        array_batches = get_batches(self.test_array, batch_size, trim_remainder=True)
+        table_batches = get_batches(self.test_table_ary, batch_size, trim_remainder=True)
+        total_batches = min(len(array_batches), len(table_batches))
+
+        loader = reader.get_fifoloader(10, [array_batch, table_batch['col_A'], table_batch['col_B']])
+
+        deq = loader.dequeue()
+        array_result = []
+        table_result = []
+
+        with self.test_session() as sess:
+            sess.run(tf.global_variables_initializer())
+
+            loader.start(sess)
+
+            with loader.catch_termination():
+                while True:
+                    tbl = np.zeros_like(self.test_table_ary[:batch_size])
+                    ary, tbl['col_A'], tbl['col_B'] = sess.run(deq)
+                    array_result.append(ary)
+                    table_result.append(tbl)
+
+
+            assert_items_equal(self, array_result, array_batches[:total_batches],
+                               key=None, epsilon=0)
+
+            assert_items_equal(self, table_result, table_batches[:total_batches],
+                               key=None, epsilon=0)
+
+            loader.stop(sess)
+
         reader.close()
 
     def test_uint64(self):

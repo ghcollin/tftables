@@ -7,6 +7,7 @@ import tensorflow as tf
 import multitables as mtb
 import numpy as np
 import threading
+import contextlib
 
 
 def open_file(filename, batch_size, **kw_args):
@@ -130,8 +131,11 @@ class TableReader:
         """
         Get a Tensorflow placeholder for a batch that will be read from the dataset located at path.
         Additional key word arguments will be forwarded to the get_queue method in multitables.
-        Note that passing the 'cyclic' key word argument is forbidden, as this library does not support
-        non-cyclic access.
+        This defaults the multitables arguments `cyclic` and `ordered` to true.
+
+        When ordering of batches is unimportant, the `ordered` argument can be set to False for potentially
+        better performance. When reading from multiple datasets (eg; when examples and labels are in two different
+        arrays), it is recommended to set `ordered` to True to preserve synchronisation.
 
         If the dataset is a table (or other compound-type array) then a dictionary of placeholders will be returned
         instead. The keys of this dictionary correspond to the column names of the table (or compound sub-types).
@@ -142,9 +146,11 @@ class TableReader:
             If the dataset is a plain array, a placeholder representing once batch is returned.
             If the dataset is a table or compound type, a dictionary of placeholders is returned.
         """
-        if 'cyclic' in kw_args:
-            raise ValueError("This library does not support non-cyclic access.")
-        queue = self.streamer.get_queue(path=path, cyclic=True, **kw_args)
+        if 'cyclic' not in kw_args:
+            kw_args['cyclic'] = True
+        if 'ordered' not in kw_args:
+            kw_args['ordered'] = True
+        queue = self.streamer.get_queue(path=path, **kw_args)
         block_size = queue.block_size
         # get an example for finding data types and row sizes.
         example = self.streamer.get_remainder(path, block_size)
@@ -157,14 +163,40 @@ class TableReader:
             # A 'scratch' space of one batch is needed to take care of remainder elements.
             # Here, remainder elements are defined as those left over when the batch size does not divide
             # the block size evenly.
-            batch_offset = 0
-            batch = np.zeros(batch_shape, dtype=batch_type)
+            scratch_offset = 0
+            scratch = np.zeros(batch_shape, dtype=batch_type)
 
             while True:
-                with queue.get() as block:
+                guard = queue.get()
+                if guard is mtb.QueueClosed:
+                    if kw_args['ordered']:
+                        remainder = self.streamer.get_remainder(path, block_size)
+                        remaining_scratch_space = self.batch_size - scratch_offset
+                        if len(remainder) >= remaining_scratch_space:
+                            rows_to_write = min(remaining_scratch_space, len(remainder))
+                            scratch[scratch_offset:scratch_offset+rows_to_write] = remainder[:rows_to_write]
+                            yield scratch
+                            indexes = range(rows_to_write, len(remainder) + 1, self.batch_size)
+                            for start, end in zip(indexes[:-1], indexes[1:]):
+                                yield remainder[start:end]
+                    break
+                with guard as block:
+                    block_offset = 0
+                    if kw_args['ordered'] and scratch_offset != 0:
+                        remaining_scratch_space = self.batch_size - scratch_offset
+                        rows_to_write = min(remaining_scratch_space, block_size)
+                        scratch[scratch_offset:scratch_offset+rows_to_write] = block[:rows_to_write]
+                        scratch_offset = scratch_offset + rows_to_write
+                        if scratch_offset == self.batch_size:
+                            yield scratch
+                            scratch_offset = 0
+                        block_offset = rows_to_write
+                        if block_offset == block_size:
+                            continue
+
                     # First, if the batch size is smaller than the block size, then
                     # batches are extracted from the block as yielded.
-                    indexes = range(0, block_size+1, self.batch_size)
+                    indexes = range(block_offset, block_size+1, self.batch_size)
                     for start, end in zip(indexes[:-1], indexes[1:]):
                         yield block[start:end]
 
@@ -172,10 +204,10 @@ class TableReader:
                     # batch size does not divide the block size evenly, then there will be remainder elements.
                     remainder = slice(indexes[-1], block_size)
                     # These remainder elements will be written into the scratch batch, starting at the current offset.
-                    write_slice = slice(batch_offset, batch_offset + (remainder.stop - remainder.start))
+                    write_slice = slice(scratch_offset, scratch_offset + (remainder.stop - remainder.start))
 
                     if write_slice.stop < self.batch_size:
-                        batch[write_slice] = block[remainder]
+                        scratch[write_slice] = block[remainder]
                     # It is possible though, that the remainder elements will write off the end of the scratch block.
                     else:
                         # In this case, the remainder elements need to be split into 2 groups: Those
@@ -183,16 +215,16 @@ class TableReader:
                         # around to the start of the scratch batch.
                         slices_A, slices_B = TableReader.__match_slices(write_slice, self.batch_size, remainder)
                         # Write the before group.
-                        batch[slices_A[0]] = block[slices_A[1]]
+                        scratch[slices_A[0]] = block[slices_A[1]]
                         # The scratch batch is now full, so yield it.
-                        yield batch
+                        yield scratch
                         # Now that the batch was yieled, it is safe to write to the front of it.
-                        batch[slices_B[0]] = block[slices_B[1]]
+                        scratch[slices_B[0]] = block[slices_B[1]]
                         # Reset the write_slice so that batch_offset will be updated correctly.
                         write_slice = slices_B[0]
 
                     # Update the batch_offset, now the remainder elements are written.
-                    batch_offset = write_slice.stop
+                    scratch_offset = write_slice.stop
 
         result = TableReader.__create_placeholders(batch_type, batch_shape)
 
@@ -231,7 +263,10 @@ class TableReader:
             feed_dict = {}
             for gen, placeholders in generators:
                 # Get the next batch
-                batch = next(gen)
+                try:
+                    batch = next(gen)
+                except StopIteration:
+                    return
                 # Populate the feed_dict with the elements of this batch.
                 TableReader.__feed_batch(feed_dict, batch, placeholders)
             yield feed_dict
@@ -246,6 +281,18 @@ class TableReader:
         for q in self.queues:
             q.close()
 
+    def get_fifoloader(self, queue_size, inputs, threads=1):
+        """
+        Convenience method for creating a FIFOQueueLoader object.
+        See the FIFOQueueLoader constructor for documentation on parameters.
+
+        :param queue_size:
+        :param inputs:
+        :param threads:
+        :return:
+        """
+        return FIFOQueueLoader(self, queue_size, inputs, threads)
+
 
 class FIFOQueueLoader:
     def __init__(self, reader, size, inputs, threads=1):
@@ -255,7 +302,7 @@ class FIFOQueueLoader:
         The graph defined by the inputs should only contain placeholders created by the supplied reader object.
 
         :param reader: An instance of the associated TableReader class.
-        :param size: The max size of the iternal queue.
+        :param queue_size: The max size of the internal queue.
         :param inputs: A list of tensors that will be stored in the queue.
         :param threads: Number of background threads to populate the queue with.
         """
@@ -263,9 +310,10 @@ class FIFOQueueLoader:
         self.coord = tf.train.Coordinator()
         self.q = tf.FIFOQueue(size, [i.dtype for i in inputs], [i.get_shape() for i in inputs])
         self.enq_op = self.q.enqueue(inputs)
-        self.q_close_op = self.q.close(cancel_pending_enqueues=True)
+        self.q_close_now_op = self.q.close(cancel_pending_enqueues=True)
         self.n_threads = threads
         self.threads = []
+        self.monitor_thread = None
 
     def __read_thread(self, sess):
         """
@@ -275,11 +323,16 @@ class FIFOQueueLoader:
         :return:
         """
         with self.coord.stop_on_exception():
-            for feed_dict in self.reader.feed():
-                sess.run(self.enq_op, feed_dict=feed_dict)
+            with contextlib.suppress(tf.errors.CancelledError):
+                for feed_dict in self.reader.feed():
+                    sess.run(self.enq_op, feed_dict=feed_dict)
 
-                if self.coord.should_stop():
-                    break
+                    if self.coord.should_stop():
+                        break
+
+    def __monitor(self, sess):
+        self.coord.join(self.threads)
+        sess.run(self.q_close_now_op)
 
     def dequeue(self):
         """
@@ -297,11 +350,18 @@ class FIFOQueueLoader:
         :param sess: Tensorflow session.
         :return: None
         """
+        if self.monitor_thread is not None:
+            raise Exception("This loader has already been started.")
+
         for _ in range(self.n_threads):
             t = threading.Thread(target=FIFOQueueLoader.__read_thread, args=(self, sess))
             t.daemon = True
             t.start()
             self.threads.append(t)
+
+        self.monitor_thread = threading.Thread(target=FIFOQueueLoader.__monitor, args=(self, sess))
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
 
     def stop(self, sess):
         """
@@ -311,5 +371,9 @@ class FIFOQueueLoader:
         :return:
         """
         self.coord.request_stop()
-        sess.run(self.q_close_op)
-        self.coord.join(self.threads)
+        sess.run(self.q_close_now_op)
+        self.coord.join([self.monitor_thread])
+
+    @staticmethod
+    def catch_termination():
+        return contextlib.suppress(tf.errors.OutOfRangeError)
