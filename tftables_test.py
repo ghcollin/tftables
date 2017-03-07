@@ -17,14 +17,21 @@ test_table_col_A_shape = (100,200)
 test_table_col_B_shape = (7,49)
 
 
-def lcm(a,b):
-    import fractions
-    return abs(a * b) // fractions.gcd(a, b) if a and b else 0
-
-
 class TestTableRow(tables.IsDescription):
     col_A = tables.UInt32Col(shape=test_table_col_A_shape)
     col_B = tables.Float64Col(shape=test_table_col_B_shape)
+
+test_mock_data_shape = (100, 100)
+
+
+class TestMockDataRow(tables.IsDescription):
+    label = tables.UInt32Col()
+    data = tables.Float64Col(shape=test_mock_data_shape)
+
+
+def lcm(a,b):
+    import fractions
+    return abs(a * b) // fractions.gcd(a, b) if a and b else 0
 
 
 def get_batches(array, size, trim_remainder=False):
@@ -81,6 +88,14 @@ class TFTablesTest(tf.test.TestCase):
         self.test_uint64_array = np.arange(10).astype(np.uint64)
         self.test_uint64_array_path = '/test_uint64'
         uint64_array = test_file.create_array(test_file.root, self.test_uint64_array_path[1:], self.test_uint64_array)
+
+        self.test_mock_data_ary = np.array([ (
+            np.random.rand(*test_mock_data_shape),
+            np.random.randint(10, size=1)[0] ) for _ in range(1000) ],
+                                       dtype=tables.dtype_from_descr(TestMockDataRow))
+        self.test_mock_data_path = '/mock_data'
+        mock = test_file.create_table(test_file.root, self.test_mock_data_path[1:], TestMockDataRow)
+        mock.append(self.test_mock_data_ary)
 
         test_file.close()
 
@@ -145,7 +160,7 @@ class TFTablesTest(tf.test.TestCase):
         array_reader.close()
         table_reader.close()
 
-    def test_noncylic(self):
+    def test_shared_reader(self):
         batch_size = 8
         reader = tftables.open_file(self.test_filename, batch_size)
 
@@ -156,7 +171,7 @@ class TFTablesTest(tf.test.TestCase):
         table_batches = get_batches(self.test_table_ary, batch_size, trim_remainder=True)
         total_batches = min(len(array_batches), len(table_batches))
 
-        loader = reader.get_fifoloader(10, [array_batch, table_batch['col_A'], table_batch['col_B']])
+        loader = reader.get_fifoloader(10, [array_batch, table_batch['col_A'], table_batch['col_B']], threads=4)
 
         deq = loader.dequeue()
         array_result = []
@@ -191,35 +206,50 @@ class TFTablesTest(tf.test.TestCase):
             batch = reader.get_batch("/test_uint64")
         reader.close()
 
+
     def test_quick_start_A(self):
-        my_network = lambda x: x
-        N = 100
+        my_network = lambda x, y: x
+        num_iterations = 100
+        num_labels = 10
 
-        # Open the HDF5 file. The batch_size defined the length
-        # (in the outer dimension) of the elements (batches) returned
-        # by the reader.
-        reader = tftables.open_file(filename=self.test_filename,
-                                    batch_size=20)
+        with tf.device('/cpu:0'):
+            # This function preprocesses the batched before they
+            # are loaded into the internal queue.
+            # You can cast data, or do one-hot transforms.
+            # If the dataset is a table, this function is required.
+            def input_transform(tbl_batch):
+                labels = tbl_batch['label']
+                data = tbl_batch['data']
 
-        # For simple arrays, the get_batch method returns a
-        # placeholder for one batch taken from the array.
-        array_batch_placeholder = reader.get_batch(self.test_array_path)
-        # We can then do a transform on the raw data.
-        array_float = tf.to_float(array_batch_placeholder)
+                truth = tf.to_float(tf.one_hot(labels, num_labels, 1, 0))
+                data_float = tf.to_float(data)
+
+                return truth, data_float
+
+            # Open the HDF5 file and create a loader for a dataset.
+            # The batch_size defines the length (in the outer dimension)
+            # of the elements (batches) returned by the reader.
+            # Takes a function as input that pre-processes the data.
+            loader = tftables.load_dataset(filename=self.test_filename,
+                                           dataset_path=self.test_mock_data_path,
+                                           input_transform=input_transform,
+                                           batch_size=20)
+
+        # To get the data, we dequeue it from the loader.
+        # Tensorflow tensors are returned in the same order as input_transformation
+        truth_batch, data_batch = loader.dequeue()
 
         # The placeholder can then be used in your network
-        result = my_network(array_float)
+        result = my_network(truth_batch, data_batch)
 
         with tf.Session() as sess:
-            # The feed method provides a generator that returns
-            # feed_dict's containing batches from your HDF5 file.
-            for i, feed_dict in enumerate(reader.feed()):
-                sess.run(result, feed_dict=feed_dict)
-                if i >= N:
-                    break
 
-        # Finally, the reader should be closed.
-        reader.close()
+            # This context manager starts and stops the internal threads and
+            # processes used to read the data from disk and store it in the queue.
+            with loader.begin(sess):
+                for _ in range(num_iterations):
+                    sess.run(result)
+
 
     def test_quick_start_B(self):
         my_network = lambda x: x
@@ -241,9 +271,9 @@ class TFTablesTest(tf.test.TestCase):
         truth_batch = tf.to_float(labels_batch)
 
         # This class creates a Tensorflow FIFOQueue and populates it with data from the reader.
-        loader = tftables.FIFOQueueLoader(reader, size=2,
-                                          # The inputs are placeholders (or graphs derived thereof) from the reader.
-                                          inputs=[col_A_pl, col_B_pl, truth_batch])
+        loader = reader.get_fifoloader(queue_size=2,
+                                       # The inputs are placeholders (or graphs derived thereof) from the reader.
+                                       inputs=[col_A_pl, col_B_pl, truth_batch])
         # Batches are taken out of the queue using a dequeue operation.
         dequeue_op = loader.dequeue()
 

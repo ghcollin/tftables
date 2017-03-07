@@ -13,8 +13,8 @@ import contextlib
 def open_file(filename, batch_size, **kw_args):
     """
     Open a HDF5 file for streaming with multitables.
-    Batches will be retrieved with size batch_size.
-    Additional keyword arguments will be passed to the multitables.Streamer object.
+    Batches will be retrieved with size ``batch_size``.
+    Additional keyword arguments will be passed to the ``multitables.Streamer`` object.
 
     :param filename: Filename for the HDF5 file to be read.
     :param batch_size: The size of the batches to be fetched by this reader.
@@ -22,6 +22,102 @@ def open_file(filename, batch_size, **kw_args):
     :return: A TableReader instance.
     """
     return TableReader(filename, batch_size, **kw_args)
+
+
+def load_dataset(filename, dataset_path, batch_size, queue_size=8,
+                 input_transform=None,
+                 ordered=False,
+                 cyclic=True,
+                 processes=None,
+                 threads=None):
+    """
+    Convenience function to quickly and easily load a dataset using best guess defaults.
+    If a table is loaded, then the ``input_transformation`` argument is required.
+    Returns an instance of ``FIFOQueueLoader`` that loads this dataset into a fifo queue.
+
+    This function takes a single argument, which is either a tensorflow placeholder for the
+    requested array or a dictionary of tensorflow placeholders for the columns in the
+    requested table. The output of this function should be either a single tensorflow tensor,
+    a tuple of tensorflow tensors, or a list of tensorflow tensors. A subsequent call to
+    ``loader.dequeue()`` will return tensors in the same order as ``input_transform``.
+
+    For example, if an array is stored in uint8 format, but we want to cast
+    it to float32 format to do work on the GPU, the ``input_transform`` would be:
+
+    ::
+
+        def input_transform(ary_batch):
+            return tf.cast(ary_batch, tf.float32)
+
+    If, instead we were loading a table with column names ``label`` and ``data`` we
+    need to transform this into a list. We might use something like the following
+    to also do the one hot transform.
+
+    ::
+
+        def input_transform(tbl_batch):
+            labels = tbl_batch['labels']
+            data = tbl_batch['data']
+
+            truth = tf.to_float(tf.one_hot(labels, num_labels, 1, 0))
+            data_float = tf.to_float(data)
+
+            return truth, data_float
+
+    Then the subsequent call to ``loader.dequeue()`` returns these int the same order:
+
+    ::
+
+        truth_batch, data_batch = loader.dequeue()
+
+    By default, this function does not preserve on-disk ordering, and gives cyclic access.
+
+    :param filename: The filename to the HDF5 file.
+    :param dataset_path: The internal HDF5 path to the dataset.
+    :param batch_size: The size of the batches to be loaded into tensorflow.
+    :param queue_size: The size of the tensorflow FIFO queue.
+    :param input_transform: A function that transforms the batch before being loaded into the queue.
+    :param processes: Number of concurrent processes that multitables should use to read data from disk.
+    :param threads: Number of threads to use to preprocess data and load the FIFO queue.
+    :return: a loader for the dataset
+    """
+    if processes is None:
+        processes = (queue_size + 1) // 2
+    if threads is None:
+        threads = 1 if ordered else processes
+
+    reader = TableReader(filename, batch_size)
+
+    batch = reader.get_batch(dataset_path, ordered=ordered, cyclic=cyclic, n_procs=processes)
+
+    if input_transform is not None:
+        # Transform the input based on user specified function.
+        processed_batch = input_transform(batch)
+    elif isinstance(batch, dict):
+        # If the user tries to load a table, but no function is given, then we cannot go further.
+        # Table's return dictionaries and there is no good default on how to handle this.
+        raise ValueError("Table datasets must have an input transformation.")
+    else:
+        # User loaded an array, no processing requested or required.
+        processed_batch = batch
+
+    if isinstance(processed_batch, list):
+        # If the user gave a list, we're good
+        pass
+    elif isinstance(processed_batch, tuple):
+        # If the user gave a tuple, turn it into a list
+        processed_batch = list(processed_batch)
+    else:
+        # If the user returned a single value, also turn it into a list
+        processed_batch = [processed_batch]
+
+    loader = FIFOQueueLoader(reader, queue_size, processed_batch, threads=threads)
+    # The user never gets a reference to the reader, so we request the loader to close the
+    # reader for us when it is stopped.
+    loader.close_reader = True
+
+    return loader
+
 
 
 class TableReader:
@@ -37,6 +133,7 @@ class TableReader:
         self.vars = []
         self.batch_size = batch_size
         self.queues = []
+        self.order_lock = None
 
     @staticmethod
     def __match_slices(slice1, len1, slice2):
@@ -150,6 +247,9 @@ class TableReader:
             kw_args['cyclic'] = True
         if 'ordered' not in kw_args:
             kw_args['ordered'] = True
+        if kw_args['ordered']:
+            if self.order_lock is None:
+                self.order_lock = threading.Lock()
         queue = self.streamer.get_queue(path=path, **kw_args)
         block_size = queue.block_size
         # get an example for finding data types and row sizes.
@@ -233,6 +333,19 @@ class TableReader:
 
         return result
 
+    @contextlib.contextmanager
+    def __feed_lock(self):
+        """
+        If ordered access was requested for any variables, then the feed method should
+        be locked to prevent accidental data races.
+        :return:
+        """
+        if self.order_lock is not None:
+            with self.order_lock:
+                yield
+        else:
+            yield
+
     @staticmethod
     def __feed_batch(feed_dict, batch, placeholders):
         """
@@ -257,19 +370,20 @@ class TableReader:
 
         :return: A generator which yields tensorflow feed_dicts
         """
-        # The reader generator is initialised here to allow safe multi-threaded access to the reader.
-        generators = [(reader(), placeholders) for reader, placeholders in self.vars]
-        while True:
-            feed_dict = {}
-            for gen, placeholders in generators:
-                # Get the next batch
-                try:
-                    batch = next(gen)
-                except StopIteration:
-                    return
-                # Populate the feed_dict with the elements of this batch.
-                TableReader.__feed_batch(feed_dict, batch, placeholders)
-            yield feed_dict
+        with self.__feed_lock():
+            # The reader generator is initialised here to allow safe multi-threaded access to the reader.
+            generators = [(reader(), placeholders) for reader, placeholders in self.vars]
+            while True:
+                feed_dict = {}
+                for gen, placeholders in generators:
+                    # Get the next batch
+                    try:
+                        batch = next(gen)
+                    except StopIteration:
+                        return
+                    # Populate the feed_dict with the elements of this batch.
+                    TableReader.__feed_batch(feed_dict, batch, placeholders)
+                yield feed_dict
 
     def close(self):
         """
@@ -314,6 +428,7 @@ class FIFOQueueLoader:
         self.n_threads = threads
         self.threads = []
         self.monitor_thread = None
+        self.close_reader = False
 
     def __read_thread(self, sess):
         """
@@ -373,7 +488,34 @@ class FIFOQueueLoader:
         self.coord.request_stop()
         sess.run(self.q_close_now_op)
         self.coord.join([self.monitor_thread])
+        if self.close_reader:
+            self.reader.close()
 
     @staticmethod
     def catch_termination():
+        """
+        In non-cyclic access, once the end of the dataset is reached, an exception
+        is called to halt all access to the queue.
+        This context manager catches this exception for silent handling
+        of the termination condition.
+        :return:
+        """
         return contextlib.suppress(tf.errors.OutOfRangeError)
+
+    @contextlib.contextmanager
+    def begin(self, tf_session, catch_termination=True):
+        """
+        Convenience context manager for starting and stopping the loader.
+        :param tf_session: The current Tensorflow session.
+        :param catch_termination: Catch the termination of the loop for non-cyclic access.
+        :return:
+        """
+        self.start(tf_session)
+        try:
+            if catch_termination:
+                with self.catch_termination():
+                    yield
+            else:
+                yield
+        finally:
+            self.stop(tf_session)
