@@ -5,7 +5,7 @@ setup(
     version='1.0.0',
     url='https://github.com/ghcollin/tftables',
     description='Interface for reading HDF5 files into Tensorflow.',
-    long_description=open("README.md").read(),
+    long_description=open("README.rst").read(),
     keywords='tensorflow HDF5',
     license='MIT',
     author='ghcollin',

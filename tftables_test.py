@@ -213,7 +213,7 @@ class TFTablesTest(tf.test.TestCase):
         num_labels = 10
 
         with tf.device('/cpu:0'):
-            # This function preprocesses the batched before they
+            # This function preprocesses the batches before they
             # are loaded into the internal queue.
             # You can cast data, or do one-hot transforms.
             # If the dataset is a table, this function is required.
