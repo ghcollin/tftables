@@ -18,17 +18,23 @@ Installation
 
 ::
 
+    pip install tftables
+
+Alternatively, to install from HEAD, run
+
+::
+
     pip install git+https://github.com/ghcollin/tftables.git
 
-or download and run
+You can also `download <https://github.com/ghcollin/tftables/archive/master.zip>`_
+or `clone the repository <https://github.com/ghcollin/tftables>`_ and run
 
 ::
 
     python setup.py install
 
-or simply copy ``tftables.py`` into your project directory.
-
-``tftables`` depends on ``multitables``, ``numpy`` and ``tensorflow``.
+``tftables`` depends on ``multitables``, ``numpy`` and ``tensorflow``. The package is compatible with the latest versions of python
+2 and 3.
 
 Quick start
 ===========
