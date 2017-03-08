@@ -410,6 +410,20 @@ class TableReader:
         return FIFOQueueLoader(self, queue_size, inputs, threads)
 
 
+@contextlib.contextmanager
+def _contextsuppress(exception):
+    """
+    Exception suppression context manager.
+    Similar functionality provided in ``contextlib.suppress``, but not in python2.7.
+    :param exception: The exception to suppress.
+    :return: A context manager that suppresses the exception.
+    """
+    try:
+        yield
+    except exception:
+        pass
+
+
 class FIFOQueueLoader:
     def __init__(self, reader, size, inputs, threads=1):
         """
@@ -440,7 +454,7 @@ class FIFOQueueLoader:
         :return:
         """
         with self.coord.stop_on_exception():
-            with contextlib.suppress(tf.errors.CancelledError):
+            with _contextsuppress(tf.errors.CancelledError):
                 for feed_dict in self.reader.feed():
                     sess.run(self.enq_op, feed_dict=feed_dict)
 
@@ -502,7 +516,7 @@ class FIFOQueueLoader:
         of the termination condition.
         :return:
         """
-        return contextlib.suppress(tf.errors.OutOfRangeError)
+        return _contextsuppress(tf.errors.OutOfRangeError)
 
     @contextlib.contextmanager
     def begin(self, tf_session, catch_termination=True):
