@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='tftables',
-    version='1.1.0',
+    version='1.1.1',
     url='https://github.com/ghcollin/tftables',
     description='Interface for reading HDF5 files into Tensorflow.',
     long_description=open("README.rst").read(),

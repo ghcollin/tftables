@@ -10,7 +10,7 @@ import threading
 import contextlib
 
 __author__ = "G. H. Collin"
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 def open_file(filename, batch_size, **kw_args):
     """
