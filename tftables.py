@@ -397,16 +397,18 @@ class TableReader:
         for q in self.queues:
             q.close()
 
-    def get_fifoloader(self, queue_size, inputs, threads=1):
+    def get_fifoloader(self, queue_size, inputs, threads=None):
         """
         Convenience method for creating a FIFOQueueLoader object.
         See the FIFOQueueLoader constructor for documentation on parameters.
 
         :param queue_size:
         :param inputs:
-        :param threads:
+        :param threads: Defaults to 1 if ordered access to this reader was
+            requested, otherwise defaults to 4.
         :return:
         """
+        threads = 4 if self.order_lock is None else 1
         return FIFOQueueLoader(self, queue_size, inputs, threads)
 
 

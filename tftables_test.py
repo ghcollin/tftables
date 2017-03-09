@@ -114,7 +114,7 @@ class TFTablesTest(tf.test.TestCase):
             cycles = lcm(len(array), blocksize)//len(array)
             batch = reader.get_batch(path, block_size=blocksize, ordered=False)
             batches = get_batches(array, batchsize)*cycles*N_threads
-            loader = tftables.FIFOQueueLoader(reader, N, get_tensors(batch), threads=N_threads)
+            loader = reader.get_fifoloader(N, get_tensors(batch), threads=N_threads)
             return reader, loader, batches
 
         array_batchsize = 10
