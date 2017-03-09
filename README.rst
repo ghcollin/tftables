@@ -63,8 +63,8 @@ An example of accessing a table in a HDF5 file.
         # The batch_size defines the length (in the outer dimension)
         # of the elements (batches) returned by the reader.
         # Takes a function as input that pre-processes the data.
-        loader = tftables.load_dataset(filename=self.test_filename,
-                                       dataset_path=self.test_mock_data_path,
+        loader = tftables.load_dataset(filename='path/to/h5_file.h5',
+                                       dataset_path='/internal/h5/path',
                                        input_transform=input_transform,
                                        batch_size=20)
 
