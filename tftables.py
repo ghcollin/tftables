@@ -21,9 +21,9 @@ def open_file(filename, batch_size, **kw_args):
     :param filename: Filename for the HDF5 file to be read.
     :param batch_size: The size of the batches to be fetched by this reader.
     :param kw_args: Optional arguments to pass to multitables.
-    :return: A TableReader instance.
+    :return: A FileReader instance.
     """
-    return TableReader(filename, batch_size, **kw_args)
+    return FileReader(filename, batch_size, **kw_args)
 
 
 def load_dataset(filename, dataset_path, batch_size, queue_size=8,
@@ -88,7 +88,7 @@ def load_dataset(filename, dataset_path, batch_size, queue_size=8,
     if threads is None:
         threads = 1 if ordered else processes
 
-    reader = TableReader(filename, batch_size)
+    reader = FileReader(filename, batch_size)
 
     batch = reader.get_batch(dataset_path, ordered=ordered, cyclic=cyclic, n_procs=processes)
 
@@ -121,11 +121,15 @@ def load_dataset(filename, dataset_path, batch_size, queue_size=8,
     return loader
 
 
+class FileReader:
+    """This class reads batches from datasets in a HDF5 file."""
 
-class TableReader:
     def __init__(self, filename, batch_size, **kw_args):
         """
-        Create a HDF5 file reader that reads batches of size batch_size.
+        Create a HDF5 file reader that reads batches of size ``batch_size``.
+        The batch size is the number of elements of the outer-most dimension of the datasets that
+        will be read. This can thought of as the number of rows that will be read at once and returned
+        to the user.
 
         :param filename: The HDF5 file to read.
         :param batch_size: The size of the batches to be read.
@@ -199,7 +203,7 @@ class TableReader:
         """
         # If .fields is None, then the array is just a simple (not-compound) array. So a single placeholder is returned.
         if type.fields is None:
-            placeholder = tf.placeholder(shape=batch_shape, dtype=TableReader.__to_tf_dtype(type))
+            placeholder = tf.placeholder(shape=batch_shape, dtype=FileReader.__to_tf_dtype(type))
             result = placeholder
 
         # Otherwise, a dictionary of placeholders is needed:
@@ -213,14 +217,14 @@ class TableReader:
 
                 # The subdtype will be None, if this is a scalar.
                 if subdtype is None:
-                    placeholder = TableReader.__create_placeholders(field_dtype, batch_shape)
+                    placeholder = FileReader.__create_placeholders(field_dtype, batch_shape)
                     placeholders[name] = placeholder
                 # If the column contains a sub-array, then subdtype is not None.
                 else:
                     subfield_type, subfield_shape = subdtype  # subfield_shape is a shape of the sub-array
                     # Append the sub-array shape to the batch_shape, as we are creating a single tensor for each column.
                     subfield_batch_shape = batch_shape + list(subfield_shape)
-                    placeholder = TableReader.__create_placeholders(subfield_type, subfield_batch_shape)
+                    placeholder = FileReader.__create_placeholders(subfield_type, subfield_batch_shape)
                     placeholders[name] = placeholder
             result = placeholders
 
@@ -315,7 +319,7 @@ class TableReader:
                         # In this case, the remainder elements need to be split into 2 groups: Those
                         # before the end (slices_A) and those after (slices_B). slices_B will then wrap
                         # around to the start of the scratch batch.
-                        slices_A, slices_B = TableReader.__match_slices(write_slice, self.batch_size, remainder)
+                        slices_A, slices_B = FileReader.__match_slices(write_slice, self.batch_size, remainder)
                         # Write the before group.
                         scratch[slices_A[0]] = block[slices_A[1]]
                         # The scratch batch is now full, so yield it.
@@ -328,7 +332,7 @@ class TableReader:
                     # Update the batch_offset, now the remainder elements are written.
                     scratch_offset = write_slice.stop
 
-        result = TableReader.__create_placeholders(batch_type, batch_shape)
+        result = FileReader.__create_placeholders(batch_type, batch_shape)
 
         self.vars.append((read_batch, result))
         self.queues.append(queue)
@@ -361,7 +365,7 @@ class TableReader:
         """
         if isinstance(placeholders, dict):
             for name in placeholders.keys():
-                TableReader.__feed_batch(feed_dict, batch[name], placeholders[name])
+                FileReader.__feed_batch(feed_dict, batch[name], placeholders[name])
         else:
             feed_dict[placeholders] = batch
 
@@ -384,7 +388,7 @@ class TableReader:
                     except StopIteration:
                         return
                     # Populate the feed_dict with the elements of this batch.
-                    TableReader.__feed_batch(feed_dict, batch, placeholders)
+                    FileReader.__feed_batch(feed_dict, batch, placeholders)
                 yield feed_dict
 
     def close(self):
@@ -405,10 +409,10 @@ class TableReader:
         :param queue_size:
         :param inputs:
         :param threads: Defaults to 1 if ordered access to this reader was
-            requested, otherwise defaults to 4.
+            requested, otherwise defaults to 2.
         :return:
         """
-        threads = 4 if self.order_lock is None else 1
+        threads = 2 if self.order_lock is None else 1
         return FIFOQueueLoader(self, queue_size, inputs, threads)
 
 
@@ -427,13 +431,16 @@ def _contextsuppress(exception):
 
 
 class FIFOQueueLoader:
+    """A class to handle the creation and population of a Tensorflow FIFOQueue."""
+
     def __init__(self, reader, size, inputs, threads=1):
         """
         Creates a loader that populates a Tensorflow FIFOQueue.
         Experimentation suggests this tends to perform best when threads=1.
-        The graph defined by the inputs should only contain placeholders created by the supplied reader object.
+        The graph defined by the inputs should be derived only from placeholders created
+        by the supplied reader object.
 
-        :param reader: An instance of the associated TableReader class.
+        :param reader: An instance of the associated FileReader class.
         :param queue_size: The max size of the internal queue.
         :param inputs: A list of tensors that will be stored in the queue.
         :param threads: Number of background threads to populate the queue with.

@@ -251,48 +251,245 @@ class TFTablesTest(tf.test.TestCase):
                     sess.run(result)
 
 
-    def test_quick_start_B(self):
-        my_network = lambda x: x
+    def test_howto(self):
+        def my_network(*args):
+            return args[0]
         N = 100
 
-        reader = tftables.open_file(filename=self.test_filename,
-                                    batch_size=20)
+        reader = tftables.open_file(filename=self.test_filename, batch_size=10)
 
-        # For tables and compound data types, a dictionary is returned.
-        table_batch_dict = reader.get_batch(self.test_table_path)
-        # The keys for the dictionary are taken from the column names of the table.
-        # The values of the dictionary are the corresponding placeholders for the batch.
-        col_A_pl, col_B_pl = table_batch_dict['col_A'], table_batch_dict['col_B']
+        # Accessing a single array
+        # ========================
 
-        # You can access multiple datasets within the HDF5 file.
-        # They all share the same batchsize, and are fed into your
-        # graph simultaneously.
-        labels_batch = reader.get_batch(self.test_array_path)
-        truth_batch = tf.to_float(labels_batch)
+        array_batch_placeholder = reader.get_batch(
+            path=self.test_array_path,  # This is the path to your array inside the HDF5 file.
+            cyclic=True,  # In cyclic access, when the reader gets to the end of the
+            # array, it will wrap back to the beginning and continue.
+            ordered=False  # The reader will not require the rows of the array to be
+            # returned in the same order as on disk.
+        )
 
-        # This class creates a Tensorflow FIFOQueue and populates it with data from the reader.
-        loader = reader.get_fifoloader(queue_size=2,
-                                       # The inputs are placeholders (or graphs derived thereof) from the reader.
-                                       inputs=[col_A_pl, col_B_pl, truth_batch])
-        # Batches are taken out of the queue using a dequeue operation.
-        dequeue_op = loader.dequeue()
+        # You can transform the batch however you like now.
+        # For example, casting it to floats.
+        array_batch_float = tf.to_float(array_batch_placeholder)
 
-        # The dequeued data can then be used in your network.
-        result = my_network(dequeue_op)
+        # The data can now be fed into your network
+        result = my_network(array_batch_float)
 
         with tf.Session() as sess:
-            # The queue loader needs to be started inside your session
+            # The feed method provides a generator that returns
+            # feed_dict's containing batches from your HDF5 file.
+            for i, feed_dict in enumerate(reader.feed()):
+                sess.run(result, feed_dict=feed_dict)
+                if i >= N:
+                    break
+
+        # Finally, the reader should be closed.
+        #reader.close()
+
+        # Accessing a single table
+        # ========================
+
+        table_batch = reader.get_batch(
+            path=self.test_mock_data_path,
+            cyclic=True,
+            ordered=False
+        )
+
+        label_batch = table_batch['label']
+        data_batch = table_batch['data']
+
+        # Using a FIFO queue
+        # ==================
+
+        # As before
+        array_batch_placeholder = reader.get_batch(
+            path=self.test_array_path,
+            cyclic=True,
+            ordered=False)
+        array_batch_float = tf.to_float(array_batch_placeholder)
+
+        # Now we create a FIFO Loader
+        loader = reader.get_fifoloader(
+            queue_size=10,  # The maximum number of elements that the
+            # internal Tensorflow queue should hold.
+            inputs=[array_batch_float],  # A list of tensors that will be stored
+            # in the queue.
+            threads=1  # The number of threads used to stuff the
+            # queue. If ordered access to a dataset
+            # was requested, then only 1 thread
+            # should be used.
+        )
+
+        # Batches can now be dequeued from the loader for use in your network.
+        array_batch_cpu = loader.dequeue()
+        result = my_network(array_batch_cpu)
+
+        with tf.Session() as sess:
+
+            # The loader needs to be started with your Tensorflow session.
             loader.start(sess)
 
-            # Then simply run your operation, data will be streamed
-            # out of the HDF5 file and into your graph!
-            for _ in range(N):
+            for i in range(N):
+                # You can now cleanly evaluate your network without a feed_dict.
                 sess.run(result)
 
-            # Finally, the queue should be stopped.
+            # It also needs to be stopped for clean shutdown.
             loader.stop(sess)
+
+        # Finally, the reader should be closed.
+        #reader.close()
+
+        # Accessing multiple datasets
+        # ===========================
+
+        # Use get_batch to access the table.
+        # Both datasets must be accessed in ordered mode.
+        table_batch_dict = reader.get_batch(
+            path=self.test_table_path,
+            ordered=True)
+        col_A_pl, col_B_pl = table_batch_dict['col_A'], table_batch_dict['col_B']
+
+        # Now use get_batch again to access an array.
+        # Both datasets must be accessed in ordered mode.
+        labels_batch = reader.get_batch(self.test_array_path, ordered=True)
+        truth_batch = tf.one_hot(labels_batch, 2, 1, 0)
+
+        # The loader takes a list of tensors to be stored in the queue.
+        # When accessing in ordered mode, threads should be set to 1.
+        loader = reader.get_fifoloader(
+            queue_size=10,
+            inputs=[truth_batch, col_A_pl, col_B_pl],
+            threads=1)
+
+        # Batches are taken out of the queue using a dequeue operation.
+        # Tensors are returned in the order they were given when creating the loader.
+        truth_cpu, col_A_cpu, col_B_cpu = loader.dequeue()
+
+        # The dequeued data can then be used in your network.
+        result = my_network(truth_cpu, col_A_cpu, col_B_cpu)
+
+        with tf.Session() as sess:
+            with loader.begin(sess):
+                for _ in range(N):
+                    sess.run(result)
+
         reader.close()
 
+    def test_howto_quick(self):
+        my_network = lambda x, y: x
+        num_iterations = 100
+        num_labels = 256
+
+        # This function preprocesses the batches before they
+        # are loaded into the internal queue.
+        # You can cast data, or do one-hot transforms.
+        # If the dataset is a table, this function is required.
+        def input_transform(tbl_batch):
+            labels = tbl_batch['label']
+            data = tbl_batch['data']
+
+            truth = tf.to_float(tf.one_hot(labels, num_labels, 1, 0))
+            data_float = tf.to_float(data)
+
+            return truth, data_float
+
+        # Open the HDF5 file and create a loader for a dataset.
+        # The batch_size defines the length (in the outer dimension)
+        # of the elements (batches) returned by the reader.
+        # Takes a function as input that pre-processes the data.
+        loader = tftables.load_dataset(filename=self.test_filename,
+                                       dataset_path=self.test_mock_data_path,
+                                       input_transform=input_transform,
+                                       batch_size=20)
+
+        # To get the data, we dequeue it from the loader.
+        # Tensorflow tensors are returned in the same order as input_transformation
+        truth_batch, data_batch = loader.dequeue()
+
+        # The placeholder can then be used in your network
+        result = my_network(truth_batch, data_batch)
+
+        with tf.Session() as sess:
+            # This context manager starts and stops the internal threads and
+            # processes used to read the data from disk and store it in the queue.
+            with loader.begin(sess):
+                for _ in range(num_iterations):
+                    sess.run(result)
+
+    def test_howto_cyclic1(self):
+
+        def my_network(*args):
+            return args[0]
+
+        reader = tftables.open_file(filename=self.test_filename, batch_size=10)
+
+        # Non-cyclic access
+        # -----------------
+
+        array_batch_placeholder = reader.get_batch(
+            path=self.test_array_path,
+            cyclic=False,
+            ordered=False)
+        array_batch_float = tf.to_float(array_batch_placeholder)
+
+        loader = reader.get_fifoloader(
+            queue_size=10,
+            inputs=[array_batch_float],
+            threads=1
+        )
+
+        array_batch_cpu = loader.dequeue()
+        result = my_network(array_batch_cpu)
+
+        with tf.Session() as sess:
+            loader.start(sess)
+
+            try:
+                # Keep iterating until the exception breaks the loop
+                while True:
+                    sess.run(result)
+            # Now silently catch the exception.
+            except tf.errors.OutOfRangeError:
+                pass
+
+            loader.stop(sess)
+
+    def test_howto_cyclic2(self):
+
+        def my_network(*args):
+            return args[0]
+
+        reader = tftables.open_file(filename=self.test_filename, batch_size=10)
+
+        # Non-cyclic access
+        # -----------------
+
+        array_batch_placeholder = reader.get_batch(
+            path=self.test_array_path,
+            cyclic=False,
+            ordered=False)
+        array_batch_float = tf.to_float(array_batch_placeholder)
+
+        loader = reader.get_fifoloader(
+            queue_size=10,
+            inputs=[array_batch_float],
+            threads=1
+        )
+
+        array_batch_cpu = loader.dequeue()
+        result = my_network(array_batch_cpu)
+
+        with tf.Session() as sess:
+            loader.start(sess)
+
+            # This context manager suppresses the exception.
+            with loader.catch_termination():
+                # Keep iterating until the exception breaks the loop
+                while True:
+                    sess.run(result)
+
+            loader.stop(sess)
 
 if __name__ == '__main__':
     tf.test.main()
