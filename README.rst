@@ -94,3 +94,17 @@ Examples
 ========
 
 See the `unit tests <https://github.com/ghcollin/tftables/blob/master/tftables_test.py>`_ for complete examples.
+
+Examples
+========
+
+See the `how-to <http://tftables.readthedocs.io/en/latest/howto.html>`_ for more in-depth documentation, and the
+`unit tests <https://github.com/ghcollin/tftables/blob/master/tftables_test.py>`_ for complete examples.
+
+Documentation
+=============
+
+`Online documentation <http://tftables.readthedocs.io/en/latest/>`_ is available.
+A `how to <http://tftables.readthedocs.io/en/latest/howto.html>`_ gives a basic overview of the library.
+
+Offline documentation can be built from the ``docs`` folder using ``sphinx``.
