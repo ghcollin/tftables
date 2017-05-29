@@ -73,12 +73,16 @@ def load_dataset(filename, dataset_path, batch_size, queue_size=8,
         truth_batch, data_batch = loader.dequeue()
 
     By default, this function does not preserve on-disk ordering, and gives cyclic access.
+    The disk ordering can be preserved using the ``ordered`` argument; however, this may result
+    in slower read performance.
 
     :param filename: The filename to the HDF5 file.
     :param dataset_path: The internal HDF5 path to the dataset.
     :param batch_size: The size of the batches to be loaded into tensorflow.
     :param queue_size: The size of the tensorflow FIFO queue.
     :param input_transform: A function that transforms the batch before being loaded into the queue.
+    :param ordered: Preserve the on-disk ordering of the requested dataset.
+    :param cyclic: Data will be loaded in an endless loop that wraps around the end of the dataset.
     :param processes: Number of concurrent processes that multitables should use to read data from disk.
     :param threads: Number of threads to use to preprocess data and load the FIFO queue.
     :return: a loader for the dataset
