@@ -388,7 +388,9 @@ class FileReader:
                 for gen, placeholders in generators:
                     # Get the next batch
                     try:
-                        batch = next(gen)
+                        # Unfortunately Tensorflow seems to keep references to these arrays around somewhere,
+                        # so a copy is required to prevent data corruption.
+                        batch = next(gen).copy()
                     except StopIteration:
                         return
                     # Populate the feed_dict with the elements of this batch.

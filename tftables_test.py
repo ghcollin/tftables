@@ -42,7 +42,7 @@ def get_batches(array, size, trim_remainder=False):
 
 
 def assert_array_equal(self, a, b):
-    self.assertTrue(np.all(a == b),
+    self.assertTrue(np.array_equal(a, b),
                     msg="LHS: \n" + str(a) + "\n RHS: \n" + str(b))
 
 
@@ -50,15 +50,17 @@ def assert_items_equal(self, a, b, key, epsilon=0):
     a = [item for sublist in a for item in sublist]
     b = [item for sublist in b for item in sublist]
     self.assertEqual(len(a), len(b))
-    a_sorted, b_sorted = (a, b) if key is None else (sorted(a, key=key), sorted(b, key=key))
+    #a_sorted, b_sorted = (a, b) if key is None else (sorted(a, key=key), sorted(b, key=key))
 
     unique_a, counts_a = np.unique(a, return_counts=True)
     unique_b, counts_b = np.unique(b, return_counts=True)
 
-    assert_array_equal(self, unique_a, unique_b)
+    self.assertAllEqual(unique_a, unique_b)
 
     epsilon *= np.prod(a[0].shape)
     delta = counts_a - counts_b
+    self.assertLessEqual(np.max(np.abs(delta)), 1, msg="More than one extra copy of an element.\n" + str(delta)
+                                                        + "\n" + str(np.unique(delta, return_counts=True)))
     non_zero = np.abs(delta) > 0
     n_non_zero = np.sum(non_zero)
     self.assertLessEqual(n_non_zero, epsilon, msg="Num. zero deltas=" + str(n_non_zero) + " epsilon=" + str(epsilon)
@@ -115,16 +117,16 @@ class TFTablesTest(tf.test.TestCase):
             batch = reader.get_batch(path, block_size=blocksize, ordered=False)
             batches = get_batches(array, batchsize)*cycles*N_threads
             loader = reader.get_fifoloader(N, get_tensors(batch), threads=N_threads)
-            return reader, loader, batches
+            return reader, loader, batches, batch
 
         array_batchsize = 10
-        array_reader, array_loader, array_batches = set_up(self.test_array_path, self.test_array,
+        array_reader, array_loader, array_batches, array_batch_pl = set_up(self.test_array_path, self.test_array,
                                                            array_batchsize, lambda x: [x])
         array_data = array_loader.dequeue()
         array_result = []
 
         table_batchsize = 5
-        table_reader, table_loader, table_batches = set_up(self.test_table_path, self.test_table_ary,
+        table_reader, table_loader, table_batches, table_batch_pl = set_up(self.test_table_path, self.test_table_ary,
                                                            table_batchsize, lambda x: [x['col_A'], x['col_B']])
         table_A_data, table_B_data = table_loader.dequeue()
         table_result = []
@@ -136,7 +138,7 @@ class TFTablesTest(tf.test.TestCase):
             table_loader.start(sess)
 
             for i in tqdm.tqdm(range(len(array_batches))):
-                array_result.append(sess.run(array_data))
+                array_result.append(sess.run(array_data).copy())
                 self.assertEqual(len(array_result[-1]), array_batchsize)
 
             assert_items_equal(self, array_batches, array_result,
